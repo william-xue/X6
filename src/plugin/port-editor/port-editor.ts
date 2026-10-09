@@ -30,6 +30,16 @@ const DEFAULT_GROUP_CONFIG = {
   zIndex: 2,
 }
 
+/** 删除角标相对引脚中心的偏移（与样式里的按钮半径 8 配套）。 */
+const BADGE_OFFSET = { x: 11, y: -11 }
+/** 角标自身的命中半径。 */
+const BADGE_RADIUS = 8
+/**
+ * 走廊余量：引脚半径 + 角标半径 + 这段余量才能保证「引脚 → 按钮」之间没有断点
+ * （中心距 ≈ 15.6，而 4.5 + 8 = 12.5 是够不着的）。
+ */
+const BADGE_SLACK = 6
+
 const DEFAULTS: Omit<
   ResolvedPortEditorOptions,
   'className' | 'outlineSelector'
@@ -74,6 +84,12 @@ export class PortEditor implements GraphPlugin {
   private adding = false
   private hit: AddHit | null = null
   private badgeTarget: { node: Node; portId: string } | null = null
+  /** 显示角标时的引脚中心（client 坐标），用于走廊判定。 */
+  private badgeAnchor: Point | null = null
+  /** 显示角标时的按钮中心（client 坐标），用于走廊判定。 */
+  private badgeCenter: Point | null = null
+  /** 显示角标时引脚在屏幕上的半径（由端口元素的盒子推出，取不到时为 0）。 */
+  private badgePinRadius = 0
 
   private hadPrevValidateMagnet = false
   private prevValidateMagnet: unknown = undefined
@@ -123,26 +139,37 @@ export class PortEditor implements GraphPlugin {
           const node = this.nodeFromElement(portEl)
           if (node) {
             const rect = portEl.getBoundingClientRect()
+            const anchor = {
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+            }
+            const center = {
+              x: anchor.x + BADGE_OFFSET.x,
+              y: anchor.y + BADGE_OFFSET.y,
+            }
             this.badgeTarget = { node, portId }
-            this.overlay.showBadge(
-              {
-                x: rect.left + rect.width / 2 + 11,
-                y: rect.top + rect.height / 2 - 11,
-              },
-              () => {
-                const badge = this.badgeTarget
-                this.badgeTarget = null
-                if (badge) this.removePin(badge.node, badge.portId)
-              },
-            )
+            this.badgeAnchor = anchor
+            this.badgeCenter = center
+            this.badgePinRadius = Math.max(rect.width, rect.height) / 2
+            this.overlay.showBadge(center, () => {
+              const badge = this.badgeTarget
+              this.clearBadge()
+              if (badge) this.removePin(badge.node, badge.portId)
+            })
           }
         }
       }
       return
     }
 
-    this.overlay.hideBadge()
-    this.badgeTarget = null
+    // 引脚与 × 之间有一段既不属于引脚、也不属于按钮的间隙，指针缓慢移过去时不能提前收起
+    if (this.keepBadgeOnPointer(e.clientX, e.clientY)) {
+      this.hit = null
+      this.overlay.hidePreview()
+      return
+    }
+
+    this.clearBadge()
 
     const node = this.nodeUnderPointer(e)
     if (!node) {
@@ -237,7 +264,8 @@ export class PortEditor implements GraphPlugin {
   private onGraphTransform = () => {
     // stale markers would drift once the viewport or a node moves
     this.hit = null
-    this.overlay.hideAll()
+    this.clearBadge()
+    this.overlay.hidePreview()
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -292,8 +320,7 @@ export class PortEditor implements GraphPlugin {
     if (!this.adding) return this
     this.adding = false
     this.hit = null
-    this.badgeTarget = null
-    this.overlay.hideAll()
+    this.clearBadge()
     const container = this.graph.container as HTMLElement
     container.classList.remove('x6-pe-adding')
     container.removeEventListener('mousemove', this.onContainerMouseMove, true)
@@ -315,6 +342,11 @@ export class PortEditor implements GraphPlugin {
 
   isAdding() {
     return this.adding
+  }
+
+  /** 一键切换添加模式：`startAdding` / `stopAdding` 的合体，供按钮直接绑定。 */
+  toggleAdding() {
+    return this.adding ? this.stopAdding() : this.startAdding()
   }
 
   /** Alias so the plugin plays well with `graph.enablePlugins()`. */
@@ -566,6 +598,30 @@ export class PortEditor implements GraphPlugin {
     return el.closest('[port]')
   }
 
+  /**
+   * 删除角标不落在引脚上（中心偏移 `(11, -11)`、半径 8，而引脚半径 4.5），两点之间隔着几个
+   * 像素的间隙。若在这段间隙里就收起角标，指针缓慢移向按钮时会「还没点到就消失」。只要指针
+   * 仍在「引脚中心 ∪ 按钮中心」这条走廊内，就保持角标。
+   */
+  private keepBadgeOnPointer(clientX: number, clientY: number) {
+    const anchor = this.badgeAnchor
+    const center = this.badgeCenter
+    if (!this.badgeTarget || !anchor || !center) return false
+    const pinRadius = this.badgePinRadius
+    const within = (point: Point, radius: number) =>
+      Math.hypot(clientX - point.x, clientY - point.y) <= radius + BADGE_SLACK
+    return within(anchor, pinRadius) || within(center, BADGE_RADIUS)
+  }
+
+  /** 收起删除角标并清掉走廊锚点，避免下一次判定读到陈旧坐标。 */
+  private clearBadge() {
+    this.badgeTarget = null
+    this.badgeAnchor = null
+    this.badgeCenter = null
+    this.badgePinRadius = 0
+    if (this.overlay) this.overlay.hideBadge()
+  }
+
   private nextPortId(node: Node) {
     let index = node.getPorts().length + 1
     // eslint-disable-next-line no-constant-condition
@@ -675,20 +731,24 @@ export class PortEditor implements GraphPlugin {
     this.prevInteracting = options.interacting
 
     const base = this.prevInteracting
-    const resolveBase = (view: unknown): Record<string, any> => {
+    // `CellView.can()` 把 `interacting === false` 读成「所有交互一律关闭」；若把它换成对象，
+    // 宿主原本关掉的其它交互（nodeResizable、edgeMovable …）会被 `val !== false` 悄悄打开。
+    // 因此只在宿主确实允许交互时才叠加 `nodeMovable: false`，否则原样返回 false。
+    const resolveBase = (view: unknown): Record<string, any> | false => {
       let value = base
       if (typeof value === 'function') {
         value = (value as (...a: unknown[]) => unknown).call(this.graph, view)
       }
-      if (typeof value === 'boolean') return value ? {} : { nodeMovable: false }
+      if (typeof value === 'boolean') return value ? {} : false
       if (value && typeof value === 'object') return { ...(value as object) }
       return {}
     }
 
-    options.interacting = (view: unknown) => ({
-      ...resolveBase(view),
-      nodeMovable: false,
-    })
+    options.interacting = (view: unknown) => {
+      const resolved = resolveBase(view)
+      if (resolved === false) return false
+      return { ...resolved, nodeMovable: false }
+    }
   }
 
   private restoreNodeMoveGuard() {

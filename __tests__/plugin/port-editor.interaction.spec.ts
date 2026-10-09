@@ -184,6 +184,28 @@ describe('plugin/port-editor > interaction', () => {
     expect(badge.style.display).toBe('none')
   })
 
+  it('keeps the delete badge while the pointer travels from the pin to the button', async () => {
+    const portId = editor.addPin(node, { x: 50, y: 0 })
+    await tick()
+    const portEl = armed.container.querySelector('[port]') as SVGElement
+
+    editor.startAdding()
+    portEl.dispatchEvent(mouse('mousemove', 50, 0))
+
+    const badge = graph.container.querySelector('.x6-pe-delete') as HTMLElement
+    expect(badge.style.display).not.toBe('none')
+
+    // 引脚半径 4.5 / 按钮半径 8 / 中心偏移 (11,-11)：中间那段既不属于引脚也不属于按钮
+    graph.container.dispatchEvent(mouse('mousemove', 5.5, -5.5))
+    expect(badge.style.display).not.toBe('none')
+
+    // 走出走廊之后才收起
+    graph.container.dispatchEvent(mouse('mousemove', 240, 240))
+    expect(badge.style.display).toBe('none')
+
+    expect(node.hasPort(portId as string)).toBe(true)
+  })
+
   it('creates a pin from a Dnd drop of a pin template and rejects the template itself', () => {
     const validateNode = editor.createDndDropValidator()
     const template = graph.addNode({ x: 40, y: -40, width: 20, height: 20 })

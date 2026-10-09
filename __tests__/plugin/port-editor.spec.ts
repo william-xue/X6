@@ -192,6 +192,30 @@ describe('plugin/port-editor', () => {
       expect(graph.container.classList.contains('x6-pe-adding')).toBe(false)
     })
 
+    it('toggles add-pin mode through toggleAdding', () => {
+      editor.toggleAdding()
+      expect(editor.isAdding()).toBe(true)
+      expect(modes).toEqual([true])
+
+      editor.toggleAdding()
+      expect(editor.isAdding()).toBe(false)
+      expect(modes).toEqual([true, false])
+    })
+
+    it('keeps a host that turned interacting off wholesale turned off', () => {
+      // CellView.can() reads `interacting === false` as "every interaction disabled"; an
+      // object would switch nodeResizable & friends back on.
+      const options = graph.options as Record<string, any>
+      options.interacting = false
+
+      editor.startAdding()
+
+      expect((options.interacting as (v: unknown) => unknown)({})).toBe(false)
+
+      editor.stopAdding()
+      expect(options.interacting).toBe(false)
+    })
+
     it('leaves add-pin mode on Escape', () => {
       editor.startAdding()
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
@@ -296,6 +320,38 @@ describe('plugin/port-editor', () => {
       expect(hit!.local.x).toBeCloseTo(50, 3)
       expect(hit!.local.y).toBeCloseTo(10, 3)
       expect(hit!.distance).toBeCloseTo(20, 3)
+    })
+
+    it('rebuilds the cached samples when the shape changes but the perimeter does not', () => {
+      // 100×100 → 150×50：周长都是 400，只按 getTotalLength() 做缓存键会一直吐旧采样点。
+      let size = { w: 100, h: 100 }
+      const el = {
+        getCTM: () => identity(),
+        getTotalLength: () => 2 * (size.w + size.h),
+        getBBox: () => ({ x: 0, y: 0, width: size.w, height: size.h }),
+        getPointAtLength: (t: number) => {
+          const perimeter = 2 * (size.w + size.h)
+          const d = ((t % perimeter) + perimeter) % perimeter
+          if (d < size.w) return { x: d, y: 0 }
+          if (d < size.w + size.h) return { x: size.w, y: d - size.w }
+          if (d < 2 * size.w + size.h) {
+            return { x: size.w - (d - size.w - size.h), y: size.h }
+          }
+          return { x: 0, y: size.h - (d - 2 * size.w - size.h) }
+        },
+      } as unknown as SVGGeometryElement
+
+      const container = containerStub(identity(), identity())
+      // 右上角外侧：100×100 时最近点是角点 (100, 0)
+      const before = findNearestOutlinePoint(container, [el], 120, -6)!
+      expect(before.local).toMatchObject({ x: 100, y: 0 })
+      expect(before.distance).toBeCloseTo(Math.hypot(20, 6), 3)
+
+      size = { w: 150, h: 50 }
+      const after = findNearestOutlinePoint(container, [el], 120, -6)!
+      expect(after.local.x).toBeCloseTo(120, 3)
+      expect(after.local.y).toBeCloseTo(0, 3)
+      expect(after.distance).toBeCloseTo(6, 3)
     })
 
     it('returns null instead of throwing when the engine exposes no geometry', () => {

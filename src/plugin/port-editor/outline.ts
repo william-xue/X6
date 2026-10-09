@@ -5,7 +5,11 @@ const EXCLUDE_SELECTOR =
   '.x6-port, .x6-port-label, .x6-tools, .x6-cell-tools, foreignObject'
 
 interface Sampler {
-  length: number
+  /**
+   * 几何指纹：弧长 + 包围盒。仅用 `getTotalLength()` 会漏掉「周长不变、形状变了」的情形
+   * （例如矩形 100×100 → 150×50，周长都是 400），此时缓存会一直吐旧采样点。
+   */
+  signature: string
   samples: Point[]
 }
 
@@ -54,6 +58,17 @@ export function collectOutlineElements(
   return found
 }
 
+function geometrySignature(el: SVGGeometryElement, length: number): string {
+  let box = 'no-bbox'
+  try {
+    const bbox = el.getBBox()
+    box = `${bbox.x},${bbox.y},${bbox.width},${bbox.height}`
+  } catch {
+    // getBBox is missing in jsdom and friends — fall back to the arc length alone.
+  }
+  return `${length}|${box}`
+}
+
 function getSampler(el: SVGGeometryElement, sampleCount: number): Sampler {
   let length = 0
   try {
@@ -62,10 +77,11 @@ function getSampler(el: SVGGeometryElement, sampleCount: number): Sampler {
     length = 0
   }
 
+  const signature = geometrySignature(el, length)
   const cached = samplerCache.get(el)
   if (
     cached &&
-    cached.length === length &&
+    cached.signature === signature &&
     (length === 0 || cached.samples.length > 0)
   ) {
     return cached
@@ -96,7 +112,7 @@ function getSampler(el: SVGGeometryElement, sampleCount: number): Sampler {
     }
   }
 
-  const sampler: Sampler = { length, samples }
+  const sampler: Sampler = { signature, samples }
   samplerCache.set(el, sampler)
   return sampler
 }
